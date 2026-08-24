@@ -6,6 +6,8 @@
 #include <DallasTemperature.h>
 #include <TinyGPSPlus.h>
 
+#define ENABLE_BATTERY_MONITOR false
+
 // 1. WiFi Credentials
 const char* ssid = "Wokwi-GUEST";
 const char* password = "";
@@ -23,6 +25,10 @@ DallasTemperature sensors(&oneWire);
 #define GPS_TX 17
 HardwareSerial gpsSerial(2);
 TinyGPSPlus gps;
+
+// 5. Battery Monitoring Setup (Using ADC1 Channel 6, which is GPIO 34)
+// GPIO 34 is input-only, making it perfect for reading sensors safely
+#define BATTERY_PIN 34
 
 bool isInternetAvailable() {
   return WiFi.status() == WL_CONNECTED;
@@ -44,6 +50,25 @@ void connectToInternet() {
   } else {
     Serial.println("\nFailed to connect to Internet.");
   }
+}
+
+// Function to calculate battery percentage safely
+float getBatteryPercentage() {
+  // ESP32 ADC is 12-bit (0 to 4095)
+  int adcValue = analogRead(BATTERY_PIN);
+  
+  // Convert ADC value to actual voltage
+  // Formula: (ADC / 4095) * 3.3V * 2 (because of the 100k+100k voltage divider)
+  float voltage = (adcValue / 4095.0) * 3.3 * 2.0;
+  
+  // Map voltage to percentage (4.2V = 100%, 3.0V = 0%)
+  float percentage = ((voltage - 3.0) / (4.2 - 3.0)) * 100.0;
+  
+  // Clamp the value between 0 and 100 to prevent weird edge cases
+  if (percentage > 100.0) percentage = 100.0;
+  if (percentage < 0.0) percentage = 0.0;
+  
+  return percentage;
 }
 
 void setup() {
@@ -71,7 +96,10 @@ void loop() {
     gps.encode(gpsSerial.read());
   }
 
-  // 3. Send to Webhook (if Internet is connected)
+  // 3. Read Battery
+  float batteryPct = getBatteryPercentage();
+
+  // 4. Send to Webhook (if Internet is connected)
   if (isInternetAvailable()) {
     HTTPClient http;
     http.begin(webhookUrl);
@@ -86,14 +114,22 @@ void loop() {
     }
     jsonData += "\"unit\": \"C\",";
     
-    // Add GPS data if a valid location fix is available
+    // GPS Data
     if (gps.location.isValid()) {
       jsonData += "\"lat\": " + String(gps.location.lat(), 6) + ",";
-      jsonData += "\"lon\": " + String(gps.location.lng(), 6);
+      jsonData += "\"lon\": " + String(gps.location.lng(), 6) + ",";
     } else {
-      jsonData += "\"lat\": null, \"lon\": null";
+      jsonData += "\"lat\": null, \"lon\": null,";
     }
     
+    // Battery Data (Only added if enabled)
+    #if ENABLE_BATTERY_MONITOR
+      float batteryPct = getBatteryPercentage();
+      jsonData += "\"battery_pct\": " + String(batteryPct, 1);
+    #else
+      jsonData += "\"battery_pct\": null"; // Clean placeholder for desk testing
+    #endif
+
     jsonData += "}";
     
     // Send POST request
